@@ -1,0 +1,556 @@
+---
+title: "Case_Study_2"
+author: "Cameron Stewart"
+date: "4/10/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Executive Summary
+
+Predicting Expected Monthly Income and Expected Attrition is critical to understanding how to manage talent within any organization. 
+
+"According to the U.S. Bureau of Statistics, the average turnover rate in the U.S. is about 12% to 15% annually. According to LinkedIn, an average annual worldwide employee turnover rate is 10.9%." source - https://www.talentlyft.com/en/blog/article/242/hr-metrics-how-and-why-to-calculate-employee-turnover-rate#:~:text=According%20to%20the%20U.S.%20Bureau,above%20the%20average%20turnover%20rates.
+
+The turnover rate will of course vary from company to company but the data highlights a key insight that a significant portion of your employee population will need to be replaced each year. When it comes to Monthly Salary, the formula is much more complicated than paying everyone based on position title. Company's must consider items like work experience, education, and a variety of other factors to determine fair compensation. Utilizing machine learning algorithms, we will use the relevant data provided to predict these two factors for Frito Lay.
+
+## Introduction
+
+Frito Lay has provided a detailed data set including 36 variables on their employees. The requested objective from their team is to provide any general insights found and determine a model to predict Attrition and another model to predict Monthly Income. Our team at DDSAnalytics have broken down the data to find the key factors driving these metrics. We then leveraged these factors using machine learning algorithms like Naive Bayes and Linear Regression to predict each of the requested variables.
+
+## Loading and Cleaning Data
+
+```{r}
+#Load required libraries
+library(stringr)
+library(dplyr)
+library(naniar)
+library(ggplot2)
+library(ggthemes)
+library(GGally)
+library(tidyverse)
+library(corrplot)
+library(Hmisc)
+library(class)
+library(caret)
+library(e1071)
+library(randomForest)
+
+#Read in data and remove irrelevant columns
+ee=read.csv("~/Documents/SMU_DS/Doing Data Science/Case_Study_2_DDS/Raw_Data_Files/CaseStudy2-data.csv",header=TRUE,stringsAsFactors = TRUE,na.strings = c("","NA"))
+str(ee)
+ee=ee %>% select(-EmployeeCount,-StandardHours,-Over18,-EmployeeNumber)
+
+
+#Where applicable, create alternative numerical version of the factor
+summary(ee$PerformanceRating)
+ee$fctrPerformanceRating=ifelse(ee$PerformanceRating<=3,'Low','High')
+ee$fctrPerformanceRating=as.factor(ee$PerformanceRating)
+ee$WorkLifeBalance_fctr
+
+ee=ee %>% mutate(DistanceFromHome_cat=ifelse(DistanceFromHome>19,"Very Far",                                    ifelse(DistanceFromHome>9,"Far",                                                                       ifelse(DistanceFromHome>3,"Close","Very Close"))))
+ee$DistanceFromHome_cat=factor(ee$DistanceFromHome_cat)
+
+ee=ee %>% mutate(numBusinessTravel=ifelse(BusinessTravel=="Non-Travel",0,
+                                   ifelse(BusinessTravel=="Travel_Rarely",1,
+                                          ifelse(BusinessTravel=="Travel_Frequently",2,3
+                                          ))))
+
+ee$numDepartment=ifelse(ee$Department=="Research & Development",0,1)
+
+ee$numGender=ifelse(ee$Gender=="Female",0,1)
+
+ee=ee %>% mutate(numMaritalStatus=ifelse(MaritalStatus=="Single",0,
+                                   ifelse(MaritalStatus=="Married",1,
+                                          ifelse(MaritalStatus=="Divorced",2,3
+                                          ))))
+
+ee$numOvertime=ifelse(ee$OverTime=="No",0,1)
+
+ee$numAttrition=ifelse(ee$Attrition=="No",0,1)
+
+#Look at scatterplot of all variables
+test=ee %>% filter(Attrition=="Yes")
+ee_num=ee %>% select_if(is.numeric)
+ee_fctr=ee %>% select_if(is.factor)
+
+ggplot(gather(ee_num), aes(value)) + 
+    geom_histogram(bins = 15) +
+    facet_wrap(~key, scales = 'free_x')
+
+#Look at linear model of JobSatisfaction and Monthly Income 
+ee %>% ggplot(aes(JobSatisfaction,MonthlyIncome,col=JobRole))+geom_smooth(method="lm")+ggtitle("Monthly Income vs. Job Satisfaction by Role")
+
+#Look at specific values of Job Satifaction against Job Role
+sat=ee %>% group_by(JobRole) %>% summarise(mean=mean(JobSatisfaction),median=median(JobSatisfaction))
+sat=data.frame(sat)
+sat %>% arrange(desc(mean))
+sat
+
+#Visualize Job Satifaction against Job Role
+ee %>% ggplot(aes(JobSatisfaction,reorder(JobRole,JobSatisfaction)))+geom_boxplot(fill='deepskyblue1',)+ggtitle("Job Satisfaction by Role")+theme(text = element_text(size=28))+stat_summary(fun.y=mean, geom="point", shape=23, size=5, color="red", fill="red")+xlab("Job Role")+ylab("Job Satisfaction")
+
+#Visualize Monthly Income against Job Role
+ee %>% ggplot(aes(MonthlyIncome,reorder(JobRole,MonthlyIncome)))+geom_boxplot(fill='deepskyblue1',)+ggtitle("Monthly Income by Role")+theme(text = element_text(size=28))+stat_summary(fun.y=mean, geom="point", shape=23, size=3, color="red", fill="red")+xlab("Job Role")+ylab("Monthly Income")
+```
+
+We have now created a numerical variable alternatives for each given variable where the variables can be converted based on category and ordinal placement. Also, we visualized each of the distributions for the variables. We can see many of the distributions are skewed. We also visualized Job Satisfaction by Job Role and Monthly income by Job Role. Each plot is organized by mean value.
+
+
+#KNN Analysis on Attrition
+
+```{r}
+#Test variables with Wicox Test for significance
+vars_num=variable.names(ee_num[,-1])
+p_matrix= matrix(nrow=length(ee_num)-1, ncol=3)
+for (i in 1:length(vars_num)){
+a=wilcox.test(ee_num[,(i+1)]~ee$Attrition,alternative="two.sided")
+p_matrix[i,1]=vars_num[i]
+p_matrix[i,2]=a[[3]]
+p_matrix[i,3]=ifelse(a[[3]]<=.0017,"keep","remove")
+}
+
+p_matrix
+p_vals=data.frame(p_matrix)
+colnames(p_vals)=c("var","p_value","sig")
+p_keep=p_vals %>% filter(sig=="keep")
+
+p_keep$p_value=as.numeric(p_keep$p_value)
+p_keep=p_keep %>% arrange(p_value)
+p_keep %>% filter(var!='numAttrition')
+p_keep_vars=p_keep[,1]
+scaled_vars=ee_num %>% select(all_of(p_keep_vars))
+
+#Create Over-Sample to ballance Attrition
+holder=scaled_vars
+for(f in 1:10){
+set.seed(f)
+att_rows=holder[holder$Attrition==1,]
+extrarows= sample(1:dim(att_rows)[1],round(.42143*dim(att_rows)[1]))
+add_df=att_rows[extrarows,]
+scaled_vars=rbind(scaled_vars,add_df)
+}
+str(scaled_vars)
+str(ee_num)
+
+#Scale Variables and Test KNN across K values
+outcome_data= scaled_vars$numAttrition
+scaled_vars=scaled_vars %>% select(-numAttrition)
+scaled_vars=data.frame(scale(scaled_vars))
+train_cols= scaled_vars
+num_rand_samples= 15
+max_k= 30
+accuracy_matrix= matrix(nrow= num_rand_samples, ncol=max_k)
+sensitivity_matrix= matrix(nrow= num_rand_samples, ncol=max_k)
+specificity_matrix= matrix(nrow= num_rand_samples, ncol=max_k)
+for(i in 1:num_rand_samples)
+{
+  set.seed(i)
+  
+  for(j in 1:max_k)
+  {
+    class_data= knn.cv(train_cols,cl = outcome_data, k=j)
+    CM= confusionMatrix(table(class_data,outcome_data))
+    accuracy_matrix[i,j]= CM$overall[1]
+    sensitivity_matrix[i,j]= CM$byClass[1]
+    specificity_matrix[i,j]= CM$byClass[2]
+    
+  }
+}
+MeanAcc = colMeans(accuracy_matrix)
+MeanSens = colMeans(sensitivity_matrix)
+MeanSpec= colMeans(specificity_matrix)
+which(MeanAcc==max(MeanAcc))
+which(MeanSens==max(MeanSens))
+which(MeanSpec==max(MeanSpec))
+max(MeanAcc)
+max(MeanSens)
+max(MeanSpec)
+par(mfrow=c(1,1))
+
+#Viualize results
+plot(x = seq(1,max_k,1),y = MeanAcc, ylim=c(0,1),type = "l", main= "KNN Classification of Attrition based on Selected Variables", xlab= "k Value", ylab= "Mean Acc (black) / Mean Spec (blue) / Mean Sens (red)",cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+lines(x = seq(1,max_k,1),y = MeanSens, ylim=c(0,1),type = "l", col="red")
+lines(x = seq(1,max_k,1),y = MeanSpec, ylim=c(0,1),type = "l", col="blue")
+summary(ee$Attrition)
+```
+
+To counteract the sample imbalance in Attrition in all upcoming models, we will use an over-sample technique and randomly draw from the 'Yes' Attrition values until the sample is balanced. KNN utilized numerical values only and requires them to be scaled. The variables were selected with a Wilcox Rank Sum Test to predict Attrition and the p-value criteria of 0.0017. The result as plotted shows the highest sensitivity KNN can achieve is approximately 0.4 which is below the requirement. We need a different algorithm.
+
+#Naive Bayes Analysis on Attrition
+
+```{r}
+#Deterimine Variables using Chi-Squared Test
+ee_nb_options=ee[,-c(1,3,34:40)]
+vars2=variable.names(ee[,-c(1,3,34:40)])
+p_matrix= matrix(nrow=length(vars2), ncol=3)
+for (i in 1:length(vars2)){
+a=chisq.test(ee$Attrition,ee_nb_options[,(i)])
+p_matrix[i,1]=vars2[i]
+p_matrix[i,2]=a$p.value
+p_matrix[i,3]=ifelse(a$p.value<=.0017,"keep","remove")
+}
+
+p_matrix
+p_vals=data.frame(p_matrix)
+colnames(p_vals)=c("var","p_value","sig")
+p_keep=p_vals %>% filter(sig=="keep")
+p_keep$p_value=as.numeric(p_keep$p_value)
+p_keep=p_keep %>% arrange(p_value)
+p_keep
+keep_len=dim(p_keep)[1]
+MeanAcc_nb=matrix(nrow= keep_len)
+MeanSens_nb=matrix(nrow= keep_len)
+MeanSpec_nb=matrix(nrow= keep_len)
+
+#Big loop to loop through adding a parameter by significance
+for(n in 1:keep_len){
+p_keep_select=head(p_keep,n)
+p_keep_vars=p_keep_select[,1]
+
+ee_nb=ee %>% select(all_of(p_keep_vars))
+ee_nb_num=ee_nb%>% select_if(is.numeric)
+ee_nb_fctr=ee_nb%>% select_if(is.factor)
+ee_nb_num=scale(ee_nb_num)
+ee_nb_w_response=cbind(ee_nb_num,ee_nb_fctr,Attrition=ee$Attrition)
+
+ee_nb_final=ee_nb_w_response
+
+#Loop to create Over-Sample to balance attrition
+for(f in 1:10){
+set.seed(f)
+att_rows=ee_nb_final[ee_nb_final$Attrition=="Yes",]
+extrarows= sample(1:dim(att_rows)[1],round(.42143*dim(att_rows)[1]))
+add_df=att_rows[extrarows,]
+ee_nb_w_response=rbind(ee_nb_w_response,add_df)
+}
+
+#Loop to test Naive Bayes over multiple iterations
+iterations= 20
+masterAcc=matrix(nrow= iterations)
+masterSens=matrix(nrow=iterations)
+masterSpec=matrix(nrow=iterations)
+splitPerc= .7 #training/test split percentage
+ for(j in 1:iterations)
+  {
+    set.seed(j)
+    trainIndices= sample(1:dim(ee_nb_w_response)[1],round(splitPerc*dim(ee_nb_w_response)[1]))
+    train= ee_nb_w_response[trainIndices,]
+    test=ee_nb_w_response[-trainIndices,]
+    train_columns_split_model= train[,-(n+1)]
+    test_columns= test[,-(n+1)]
+    
+    model= naiveBayes(train_columns_split_model,train$Attrition)
+    CM= confusionMatrix(table(predict(model,test_columns), test$Attrition))
+    masterAcc[j]=CM$overall[1]
+    masterSens[j]=CM$byClass[1]
+    masterSpec[j]=CM$byClass[2]
+  }
+MeanAcc_nb[n]=colMeans(masterAcc)
+MeanSens_nb[n]=colMeans(masterSens)
+MeanSpec_nb[n]= colMeans(masterSpec)
+}
+MeanAcc_nb
+MeanSens_nb
+MeanSpec_nb
+m=MeanSens_nb+MeanSpec_nb
+m
+
+#Visualize Results
+plot(x = seq(1,length(MeanAcc_nb),1),y = MeanAcc_nb, ylim=c(0,1),type = "l", main= "NB Classification of Attrition based on Selected Variables", xlab= "Parameters", ylab= "Mean Acc (black) / Mean Spec (blue) / Mean Sens (red)",cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+lines(x = seq(1,length(MeanSens_nb),1),y = MeanSens_nb, ylim=c(0,1),type = "l", col="red")
+lines(x = seq(1,length(MeanSpec_nb),1),y = MeanSpec_nb, ylim=c(0,1),type = "l", col="blue")
+
+dim(ee_nb_final)
+str(ee_nb_w_response)
+
+#Test final model on train data
+model=naiveBayes(ee_nb_w_response[,-c(5:12)],ee_nb_w_response$Attrition)
+CM= confusionMatrix(table(predict(model,ee_nb_w_response[,-12]),
+                          ee_nb_w_response$Attrition))   
+CM
+
+#Create csv of predictions on test data and store predictions on GitHub
+att_test=read.csv("~/Documents/SMU_DS/Doing Data Science/Case_Study_2_DDS/Raw_Data_Files/CaseStudy2CompSet No Attrition.csv",header = TRUE,stringsAsFactors = TRUE)
+ref=ee_nb_w_response %>% select(-Attrition)
+att_vars=att_test %>% select(all_of(variable.names(ref)))
+variable.names(ee_nb_w_response)
+model=naiveBayes(ee_nb_w_response[,-c(5:12)],ee_nb_w_response$Attrition)
+att_preds=predict(model,att_vars) 
+final_preds=data.frame(ID=att_test$ID,Attrition=att_preds)
+summary(final_preds)
+summary(ee$Attrition)
+summary(ee_nb_w_response$Attrition)
+#write.csv(final_preds,"Case2PredictionsStewartAttrition.csv")
+```
+
+Naive Bayes allows categorical and continuous variables to be used. The variables were selected using a Chi-Squared Test with a p-value criteria of 0.0017. The plot tested adding one parameter at a time in the order of significance. The ideal result is using the top four parameters (Overtime, StockOptionLevel, JobRole, and JobInvolvement). They achieved a sensitivity of 0.6877 and a specificity of 0.6548.
+
+# Random Forest Analysis on Attrition
+
+```{r}
+#Select Variables
+ee_rf_options=ee[,-c(1,3,34:40)]
+vars2=variable.names(ee[,-c(1,3,34:40)])
+p_matrix= matrix(nrow=length(vars2), ncol=3)
+for (i in 1:length(vars2)){
+a=chisq.test(ee$Attrition,ee_rf_options[,(i)])
+p_matrix[i,1]=vars2[i]
+p_matrix[i,2]=a$p.value
+p_matrix[i,3]=ifelse(a$p.value<=.3,"keep","remove")
+}
+
+p_matrix
+p_vals=data.frame(p_matrix)
+colnames(p_vals)=c("var","p_value","sig")
+p_keep=p_vals %>% filter(sig=="keep")
+p_keep$p_value=as.numeric(p_keep$p_value)
+p_keep=p_keep %>% arrange(p_value)
+p_keep[c(3,5,6,7,8),]
+keep_len=dim(p_keep)[1]
+
+#p_keep_select=head(p_keep,5)
+#p_keep_vars=p_keep_select[,1]
+p_keep_vars=p_keep[,1]
+
+#Test RF
+ee_rf=ee %>% select(all_of(p_keep_vars))
+ee_rf_num=ee_rf%>% select_if(is.numeric)
+ee_rf_fctr=ee_rf%>% select_if(is.factor)
+ee_rf_num=scale(ee_rf_num)
+ee_rf_w_response=cbind(ee_rf_num,ee_rf_fctr,Attrition=ee$Attrition)
+iterations=5
+masterAcc=matrix(nrow= iterations)
+masterSens=matrix(nrow=iterations)
+masterSpec=matrix(nrow=iterations)
+a=c()
+i=5
+
+holder=ee_rf_w_response
+for(f in 1:10){
+set.seed(f)
+att_rows=holder[holder$Attrition==1,]
+extrarows= sample(1:dim(att_rows)[1],round(.42143*dim(att_rows)[1]))
+add_df=att_rows[extrarows,]
+ee_rf_w_response=rbind(ee_rf_w_response,add_df)
+}
+
+for (i in 1:iterations) {
+    set.seed(i)
+    trainIndices= sample(1:dim(ee_rf_w_response)[1],round(splitPerc*dim(ee_rf_w_response)[1]))
+    train= ee_rf_w_response[trainIndices,]
+    test=ee_rf_w_response[-trainIndices,]
+    train_columns_split_model= train[,-dim(ee_rf_w_response)[2]]
+    test_columns= test[,-dim(ee_rf_w_response)[2]]
+  model <- randomForest(Attrition ~ ., data = train, ntree = 1000, mtry = i, importance = TRUE)
+  predValid <- predict(model, test_columns, type = "class")
+  CM= confusionMatrix(table(predValid, test$Attrition))
+  #a[i] = mean(predValid == test$Attrition)
+  masterAcc[i]=CM$overall[1]
+  masterSens[i]=CM$byClass[1]
+  masterSpec[i]=CM$byClass[2]
+  }
+MeanAcc_rf=colMeans(masterAcc)
+MeanSens_rf=colMeans(masterSens)
+MeanSpec_rf= colMeans(masterSpec)
+MeanAcc_rf
+MeanSens_rf
+MeanSpec_rf
+
+#Visualize Results
+plot(x = seq(1,iterations,1),y = masterAcc, ylim=c(0,1),type = "l", main= "NB Classification of Attrition", xlab= "k Value", ylab= "Mean Accuracy")
+lines(x = seq(1,iterations,1),y = masterSens, ylim=c(0,1),type = "l", xlab= "k Value", col="red")
+lines(x = seq(1,iterations,1),y = masterSpec, ylim=c(0,1),type = "l",  xlab= "k Value", col="blue")
+
+ model <- randomForest(Attrition ~ ., data = train, ntree = 1500, mtry = 7, importance = TRUE)
+ model$importance
+```
+
+The Random Forest model was an experiment on a model I had not used before. After experimenting with different mtry values and randomTree values, the highest specificity was less than 0.2 which is far below the 0.6 criteria. This model was not usable.
+
+#Linear Regression to Predict Income
+
+```{r}
+#Look at significance and correlations
+res2 <- rcorr(as.matrix(ee_num[,-c(25:30)]))
+
+str(res2$r)
+
+corrplot(res2$r, type="upper", order="hclust", 
+         p.mat = res2$P, sig.level = 0.1, insig = "blank")
+
+c1=data.frame(attributes (res2$P[,11]))
+c2=data.frame(res2$P[,11])
+c3=data.frame(abs(res2$r[,11]))
+cor_p=cbind(c1,c2,c3)
+colnames(cor_p)=c("vars","p_value","r_value")
+cor_p=cor_p %>% arrange(desc(r_value))
+cor_p$sig=ifelse(cor_p$p_value<=.01,'sig','not sig')
+cor_p
+cor_p_select=cor_p %>% filter(sig=='sig'|vars=='MonthlyIncome' )
+cor_p_select
+cor_p_select=cor_p_select[,1]
+eekeep=ee %>% select(all_of(cor_p_select))
+eekeep_len=length(eekeep)-1
+par(mfrow=c(4,3))
+# for(i in 1:eekeep_len){
+#   plot(eekeep$MonthlyIncome,eekeep[,(i+1)])
+# }
+
+#Looking at untransformed scatterplots
+eegath=eekeep %>%
+  as_data_frame() %>%
+  gather(key = "variable", value = "value",
+         -MonthlyIncome)
+
+ggplot(eegath, aes(x = value, y = MonthlyIncome)) +
+  geom_point(aes()) +
+  geom_smooth(method='loess')+
+  facet_wrap(~variable,scales='free')
+
+ggplot(eegath, aes(x = value, y = MonthlyIncome)) +
+  geom_point(aes()) +
+  geom_smooth(method='lm')+
+  facet_wrap(~variable,scales='free')
+
+
+
+#Looking at log(MonthlyIncome) scatter
+eekeep_logy=eekeep
+eekeep_logy$MonthlyIncome=log(eekeep_logy$MonthlyIncome)
+
+eegath2=eekeep_logy %>%
+  as_data_frame() %>%
+  gather(key = "variable", value = "value",
+         -MonthlyIncome)
+
+ggplot(eegath2, aes(x = value, y = MonthlyIncome)) +
+  geom_point(aes()) +
+  geom_smooth(method='lm')+
+  facet_wrap(~variable,scales='free')
+
+ggplot(eegath2, aes(x = value, y = MonthlyIncome)) +
+  geom_point(aes()) +
+  geom_smooth(method='loess')+
+  facet_wrap(~variable,scales='free')
+
+#Looking at log(MonthlyIncome) and log all variables scatter
+eekeep_logall=eekeep
+len=length(eekeep_logall)
+for(i in 1:len){
+  eekeep_logall[,i]=log(eekeep_logall[,i]+.01)
+}
+str(eekeep_logall)
+eegath3=eekeep_logall %>%
+  as_data_frame() %>%
+  gather(key = "variable", value = "value",
+         -MonthlyIncome)
+
+ggplot(eegath3, aes(x = value, y = MonthlyIncome)) +
+  geom_point(aes()) +
+  geom_smooth(method='lm')+
+  facet_wrap(~variable,scales='free')
+
+#Looking at the MonthlyIncome and log of all x values
+eekeep_logx=eekeep
+len=length(eekeep_logx)-1
+for(i in 1:len){
+  eekeep_logx[,i+1]=log(eekeep_logx[,i+1]+.01)
+}
+str(eekeep_logx)
+eegath3=eekeep_logx %>%
+  as_data_frame() %>%
+  gather(key = "variable", value = "value",
+         -MonthlyIncome)
+
+ggplot(eegath3, aes(x = value, y = MonthlyIncome)) +
+  geom_point(aes()) +
+  geom_smooth(method='lm')+
+  facet_wrap(~variable,scales='free')
+
+ggplot(eegath3, aes(x = value, y = MonthlyIncome)) +
+  geom_point(aes()) +
+  geom_smooth(method='loess')+
+  facet_wrap(~variable,scales='free')
+
+str(ee_fctr)
+
+#fit the model with selected variables
+par(mfrow=c(2,2))
+fit1=glm(MonthlyIncome~I(log(JobLevel)^2)+I(TotalWorkingYears^2)+I(YearsInCurrentRole^3)+I(Education^2)+log(JobLevel)+.-Age-YearsSinceLastPromotion-YearsInCurrentRole-NumCompaniesWorked-YearsWithCurrManager-Education-JobLevel,data = eekeep)
+summary(fit1)
+plot(fit1)
+
+ee_nums_w_cat_options=cbind(MonthlyIncome=ee$MonthlyIncome,JobLevel=ee$JobLevel,TotalWorkingYears=ee$TotalWorkingYears,YearsInCurrentRole=ee$YearsInCurrentRole,Education=ee$Education,YearsAtCompany=ee$YearsAtCompany,ee_fctr)
+
+fit2=glm(MonthlyIncome~I(log(JobLevel)^2)+I(TotalWorkingYears^2)+I(Education^2)+I(YearsInCurrentRole^3)+log(JobLevel)+JobRole*TotalWorkingYears+.-YearsInCurrentRole-Education-JobLevel
+          -Attrition-BusinessTravel-Department-EducationField-Gender-MaritalStatus-OverTime-fctrPerformanceRating-DistanceFromHome_cat
+          ,data = ee_nums_w_cat_options,)
+summary(fit2)
+plot(fit2)
+RSS <- c(crossprod(fit2$residuals))
+MSE <- RSS / length(fit2$residuals)
+RMSE <- sqrt(MSE)
+RMSE
+
+e=ee_nums_w_cat_options
+e$JobLevel=factor(e$JobLevel)
+fit_alt=glm(MonthlyIncome~I(TotalWorkingYears^2)+I(Education^2)+I(YearsInCurrentRole^3)+JobRole*TotalWorkingYears+JobLevel*JobRole+.-YearsInCurrentRole-Education-Attrition-BusinessTravel-Department-EducationField-Gender-MaritalStatus-OverTime-fctrPerformanceRating-DistanceFromHome_cat
+          ,data = e)
+summary(fit_alt)
+plot(fit_alt)
+
+#visualizing JobRole by the numerical variables remaining
+ee_final=data.frame(MonthlyIncome=ee$MonthlyIncome,JobLevel=ee$JobLevel,TotalWorkingYears=ee$TotalWorkingYears,YearsInCurrentRole=ee$YearsInCurrentRole,Education=ee$Education,YearsAtCompany=ee$YearsAtCompany,JobRole=ee$JobRole)
+
+str(ee_final)
+
+eegath3=ee_final %>%
+  as_data_frame() %>%
+  gather(key = "variable", value = "value",
+         -MonthlyIncome,-JobRole)
+
+ggplot(eegath3, aes(x = value, y = MonthlyIncome, col=JobRole)) +
+  geom_point(aes()) +
+  geom_smooth(method='lm')+
+  facet_wrap(~variable,scales='free')
+
+#This is the final model with the lowest AIC
+fit3=glm(MonthlyIncome~I(log(JobLevel)^2)+log(JobLevel)+I(TotalWorkingYears^2)+TotalWorkingYears+JobRole*TotalWorkingYears+.-YearsAtCompany-YearsInCurrentRole-Education-JobLevel,data = ee_final)
+summary(fit3)
+par(mfrow=c(3,2))
+plot(fit3)
+RSS <- c(crossprod(fit3$residuals))
+MSE <- RSS / length(fit3$residuals)
+RMSE <- sqrt(MSE)
+RMSE
+
+#####Predicting the test values
+# income_test = read.csv("Raw_Data_Files/CaseStudy2CompSet No Salary.csv",header = TRUE,stringsAsFactors = TRUE)
+# ref=ee_final %>% select(-MonthlyIncome)
+# ref=cbind(ID=ee$ID,ref)
+# income_test=income_test %>% select(all_of(variable.names(ref)))
+# str(income_test)
+# preds=predict(fit3,income_test)
+# preds=unlist(preds, use.names=FALSE)
+# income_preds=data.frame(ID=income_test$ID,MonthlyIncome=preds)
+# income_preds
+# summary(income_preds)
+# summary(ee$MonthlyIncome)
+#write.csv(income_preds,"Case2PredictionsStewartSalary.csv")
+```
+
+Using multiple linear regression, we were able to predict Monthly Income. To measure the significance of numerical variables to Monthly Income, a t-test was used. To measure the significance of categorical variables to Monthly Income, a Chi-Squared Test was used. Iterating through combinations of possible models, the final model (fit3) was found to have the lowest AIC. The RMSE = 973.8445.
+
+## Conclusion
+
+Overall, we evaluated Job Role against Job Satisfaction and Monthly Income. We identified key variables and predicted Attrition using Naive Bayes. We identified key variables and predicted Monthly Income using Multiple Linear Regression.
+
+Next Steps:
+We need to understand if the submitted test predictions have a fit similar to our model. If so, we can proceed with implementation. We should also evaluate future opportunities to leverage data science within Frito Lay.
+
