@@ -482,7 +482,7 @@ str(ee_fctr)
 
 #fit the model with selected variables
 par(mfrow=c(2,2))
-fit1=glm(MonthlyIncome~I(log(JobLevel)^2)+I(TotalWorkingYears^2)+I(YearsInCurrentRole^3)+I(Education^2)+log(JobLevel)+.-Age-YearsSinceLastPromotion-YearsInCurrentRole-NumCompaniesWorked-YearsWithCurrManager-Education-JobLevel,data = eekeep)
+fit1=lm(MonthlyIncome~I(log(JobLevel)^2)+I(TotalWorkingYears^2)+I(YearsInCurrentRole^3)+I(Education^2)+log(JobLevel)+.-Age-YearsSinceLastPromotion-YearsInCurrentRole-NumCompaniesWorked-YearsWithCurrManager-Education-JobLevel,data = eekeep)
 summary(fit1)
 plot(fit1)
 
