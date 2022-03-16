@@ -112,7 +112,7 @@ The provided models for attrition and monthly income both exceed the company's t
 
 [Full Analysis](../main/Analysis%20and%20Predictions/Case_Study.pdf)
 
-All Raw Data and Prompt infomation in the associated folder.
+All Raw Data and Prompt information in the associated folder.
 
 ##### Technologies:
 
